@@ -64,3 +64,5 @@ set(desktop_app_skip_libs
 
 add_subdirectory(cmake)
 add_subdirectory(Telegram)
+
+# SweetBaby12138 fork test commit
