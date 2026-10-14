@@ -1,4 +1,4 @@
-﻿/*
+/*
 This file is part of Telegram Desktop,
 the official desktop application for the Telegram messaging service.
 
@@ -128,6 +128,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <QtGui/QGuiApplication>
 #include <QtGui/QClipboard>
+#include <QtCore/QMimeData>
+#include <QtCore/QUrl>
+#include <QtCore/QDir>
+#include <QtCore/QFile>
 
 #include "data/data_saved_sublist.h"
 
@@ -359,6 +363,66 @@ void CopyImage(not_null<PhotoData*> photo) {
 	media->setToClipboard();
 }
 
+// 复制一个或多个本地文件到系统剪贴板 (CF_HDROP on Windows)
+void CopyLocalFilesToClipboard(const QStringList &paths) {
+	if (paths.isEmpty()) {
+		return;
+	}
+	auto mime = std::make_unique<QMimeData>();
+	QList<QUrl> urls;
+	for (const auto &path : paths) {
+		urls.append(QUrl::fromLocalFile(path));
+	}
+	mime->setUrls(urls);
+	mime->setData(u"text/uri-list"_q, mime->data(u"text/uri-list"_q));
+	QGuiApplication::clipboard()->setMimeData(mime.release());
+}
+
+// 复制 DocumentData 文件到剪贴板
+// 如果文件尚未下载完成则返回 false
+bool CopyDocumentFile(not_null<DocumentData*> document) {
+	const auto path = document->filepath(true);
+	if (path.isEmpty()) {
+		return false;
+	}
+	CopyLocalFilesToClipboard({ path });
+	return true;
+}
+
+// 复制 PhotoData 原图像文件到剪贴板
+// 优先使用已有本地路径，否则保存为临时 .jpg 再复制
+bool CopyPhotoFile(not_null<PhotoData*> photo) {
+	const auto media = photo->activeMediaView();
+	if (photo->isNull() || !media || !media->loaded()) {
+		return false;
+	}
+	// 优先用 PhotoData 自身的文件路径
+	const auto loc = photo->location(true);
+	if (!loc.isEmpty() && QFile::exists(loc.name())) {
+		CopyLocalFilesToClipboard({ loc.name() });
+		return true;
+	}
+	const auto large = Data::PhotoSize::Large;
+	const auto loaded = media->image(large);
+	if (!loaded) {
+		return false;
+	}
+	auto original = loaded->original();
+	if (original.isNull()) {
+		return false;
+	}
+	// 保存到临时文件再复制
+	const auto tempPath = QDir::tempPath()
+		+ u"/tg_photo_"_q
+		+ QString::number(photo->id)
+		+ u".jpg"_q;
+	if (!original.save(tempPath, "JPG")) {
+		return false;
+	}
+	CopyLocalFilesToClipboard({ tempPath });
+	return true;
+}
+
 void ShowStickerPackInfo(
 		not_null<DocumentData*> document,
 		not_null<ListWidget*> list) {
@@ -390,6 +454,17 @@ void AddPhotoActions(
 			const auto item = photo->owner().message(contextId);
 			if (!list->showCopyMediaRestriction(item)) {
 				CopyImage(photo);
+			}
+		}, &st::menuIconCopy);
+		// 64Gram enhancement: copy original file (for pasting into WeChat etc.)
+		menu->addAction(u"复制文件"_q, [=] {
+			const auto item = photo->owner().message(contextId);
+			if (!list->showCopyMediaRestriction(item)) {
+				if (!CopyPhotoFile(photo)) {
+					list->controller()->uiShow()->showToast({
+						.text = { u"复制失败：图片未下载"_q },
+					});
+				}
 			}
 		}, &st::menuIconCopy);
 	}
@@ -504,6 +579,14 @@ void AddDocumentActions(
 				: tr::lng_context_show_in_folder(tr::now)),
 			[=] { ShowInFolder(document); },
 			&st::menuIconShowInFolder);
+		// 64Gram enhancement: copy file to clipboard (for pasting into WeChat etc.)
+		menu->addAction(u"复制文件"_q, [=] {
+			if (!CopyDocumentFile(document)) {
+				list->controller()->uiShow()->showToast({
+					.text = { u"复制失败：文件未下载"_q },
+				});
+			}
+		}, &st::menuIconCopy);
 	}
 	if (document->hasAttachedStickers()) {
 		const auto controller = list->controller();
